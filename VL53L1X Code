@@ -1,0 +1,318 @@
+#include <Wire.h>
+#include "SparkFun_VL53L1X.h"
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+#include "Adafruit_DRV2605.h"
+
+// I2C Bus Pins
+#define SDA_PIN 8
+#define SCL_PIN 9
+
+// ToF XSHUT Pins
+#define XSHUT_1 10
+#define XSHUT_2 11
+#define XSHUT_3 35
+#define XSHUT_4 48
+#define XSHUT_5 47
+
+// Distance thresholds in millimeters
+#define ALERT_DISTANCE 1000
+#define MIN_VALID_DISTANCE 50
+
+// Distance zones for consistent haptic feedback
+#define CLOSE_DISTANCE 350
+#define MEDIUM_DISTANCE 700
+
+// Filtering settings
+#define HAZARD_CONFIRM_COUNT 4
+#define APPROACH_CONFIRM_COUNT 2
+#define APPROACH_MARGIN_MM 8
+
+// DRV2605 buzz effects
+#define LOW_BUZZ_EFFECT 45
+#define MEDIUM_BUZZ_EFFECT 46
+#define HIGH_BUZZ_EFFECT 47
+
+// Create objects for all I2C devices
+SFEVL53L1X tof1;
+SFEVL53L1X tof2;
+SFEVL53L1X tof3;
+SFEVL53L1X tof4;
+SFEVL53L1X tof5;
+
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
+Adafruit_DRV2605 drv;
+
+// Function to play repeated buzz outputs
+void playBuzzPattern(int effect, int repeatCount) {
+  for (int i = 0; i < repeatCount; i++) {
+    drv.setWaveform(0, effect);
+    drv.setWaveform(1, 0);
+    drv.go();
+
+    delay(200);  // buzz duration / feel time
+    delay(120);  // pause between buzzes
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial);
+  Serial.println("Initializing TripSense Master System...");
+
+  // Start shared I2C bus
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  // --- STEP 1: Boot ToF Sensors ---
+  pinMode(XSHUT_1, OUTPUT);
+  pinMode(XSHUT_2, OUTPUT);
+  pinMode(XSHUT_3, OUTPUT);
+  pinMode(XSHUT_4, OUTPUT);
+  pinMode(XSHUT_5, OUTPUT);
+
+  digitalWrite(XSHUT_1, LOW);
+  digitalWrite(XSHUT_2, LOW);
+  digitalWrite(XSHUT_3, LOW);
+  digitalWrite(XSHUT_4, LOW);
+  digitalWrite(XSHUT_5, LOW);
+  delay(50);
+
+  // Boot ToF 1 (0x30)
+  digitalWrite(XSHUT_1, HIGH);
+  delay(50);
+  tof1.setI2CAddress(0x30);
+
+  if (tof1.begin() != 0) {
+    Serial.println("ToF 1 failed!");
+  } else {
+    tof1.setDistanceModeLong();
+  }
+
+  // Boot ToF 2 (0x32)
+  digitalWrite(XSHUT_2, HIGH);
+  delay(50);
+  tof2.setI2CAddress(0x32);
+
+  if (tof2.begin() != 0) {
+    Serial.println("ToF 2 failed!");
+  } else {
+    tof2.setDistanceModeLong();
+  }
+
+  // Boot ToF 3 (0x34)
+  digitalWrite(XSHUT_3, HIGH);
+  delay(50);
+  tof3.setI2CAddress(0x34);
+
+  if (tof3.begin() != 0) {
+    Serial.println("ToF 3 failed!");
+  } else {
+    tof3.setDistanceModeLong();
+  }
+
+  // Boot ToF 4 (0x36)
+  digitalWrite(XSHUT_4, HIGH);
+  delay(50);
+  tof4.setI2CAddress(0x36);
+
+  if (tof4.begin() != 0) {
+    Serial.println("ToF 4 failed!");
+  } else {
+    tof4.setDistanceModeLong();
+  }
+
+  // Boot ToF 5 (0x38)
+  digitalWrite(XSHUT_5, HIGH);
+  delay(50);
+  tof5.setI2CAddress(0x38);
+
+  if (tof5.begin() != 0) {
+    Serial.println("ToF 5 failed!");
+  } else {
+    tof5.setDistanceModeLong();
+  }
+
+  // --- STEP 2: Boot BNO055 IMU ---
+  if (!bno.begin()) {
+    Serial.println("BNO055 IMU failed!");
+  } else {
+    bno.setExtCrystalUse(true);
+  }
+
+  // --- STEP 3: Boot Haptic Driver ---
+  if (!drv.begin()) {
+    Serial.println("DRV2605 Haptic Driver failed!");
+  } else {
+    drv.selectLibrary(1);
+    drv.setMode(DRV2605_MODE_INTTRIG);
+  }
+
+  Serial.println("System Online. Scanning environment...");
+}
+
+void loop() {
+  // 1. Command ToFs to read
+  tof1.startRanging();
+  tof2.startRanging();
+  tof3.startRanging();
+  tof4.startRanging();
+  tof5.startRanging();
+
+  unsigned long waitStart = millis();
+
+  while (!tof1.checkForDataReady() ||
+         !tof2.checkForDataReady() ||
+         !tof3.checkForDataReady() ||
+         !tof4.checkForDataReady() ||
+         !tof5.checkForDataReady()) {
+
+    if (millis() - waitStart > 50) {
+      break;
+    }
+
+    delay(1);
+  }
+
+  // 2. Fetch distances
+  int dist1 = tof1.getDistance();
+  int dist2 = tof2.getDistance();
+  int dist3 = tof3.getDistance();
+  int dist4 = tof4.getDistance();
+  int dist5 = tof5.getDistance();
+
+  tof1.clearInterrupt();
+  tof2.clearInterrupt();
+  tof3.clearInterrupt();
+  tof4.clearInterrupt();
+  tof5.clearInterrupt();
+
+  tof1.stopRanging();
+  tof2.stopRanging();
+  tof3.stopRanging();
+  tof4.stopRanging();
+  tof5.stopRanging();
+
+  // 3. Fetch orientation from BNO055
+  sensors_event_t orientationData;
+  bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+
+  float yaw = orientationData.orientation.x;
+  float pitch = orientationData.orientation.y;
+  float roll = orientationData.orientation.z;
+
+  // 4. Print sensor data
+  Serial.print("1_mm:"); Serial.print(dist1);
+  Serial.print(", 2_mm:"); Serial.print(dist2);
+  Serial.print(", 3_mm:"); Serial.print(dist3);
+  Serial.print(", 4_mm:"); Serial.print(dist4);
+  Serial.print(", 5_mm:"); Serial.print(dist5);
+
+  Serial.print(", Yaw_deg:"); Serial.print(yaw);
+  Serial.print(", Pitch_deg:"); Serial.print(pitch);
+  Serial.print(", Roll_deg:"); Serial.println(roll);
+
+  // 5. Consistent Haptic Threat Logic
+  // Distance = main warning level
+  // No extra pulse for fast movement
+
+  static int hazardCount = 0;
+  static int approachCount = 0;
+  static int lastClosestDistance = 0;
+  static int lastApproachDelta = 0;
+
+  int closestDistance = 9999;
+
+  // Find closest valid hazard from all 5 sensors
+  if (dist1 > MIN_VALID_DISTANCE && dist1 < ALERT_DISTANCE) {
+    closestDistance = min(closestDistance, dist1);
+  }
+
+  if (dist2 > MIN_VALID_DISTANCE && dist2 < ALERT_DISTANCE) {
+    closestDistance = min(closestDistance, dist2);
+  }
+
+  if (dist3 > MIN_VALID_DISTANCE && dist3 < ALERT_DISTANCE) {
+    closestDistance = min(closestDistance, dist3);
+  }
+
+  if (dist4 > MIN_VALID_DISTANCE && dist4 < ALERT_DISTANCE) {
+    closestDistance = min(closestDistance, dist4);
+  }
+
+  if (dist5 > MIN_VALID_DISTANCE && dist5 < ALERT_DISTANCE) {
+    closestDistance = min(closestDistance, dist5);
+  }
+
+  bool hazardDetected = (closestDistance != 9999);
+
+  if (hazardDetected) {
+    hazardCount++;
+
+    if (lastClosestDistance > 0) {
+      int approachDelta = lastClosestDistance - closestDistance;
+
+      if (approachDelta >= APPROACH_MARGIN_MM) {
+        approachCount++;
+        lastApproachDelta = approachDelta;
+
+        Serial.print(">>> HAZARD IS APPROACHING. Delta_mm:");
+        Serial.println(approachDelta);
+      } else {
+        approachCount = 0;
+        lastApproachDelta = 0;
+      }
+    }
+
+    lastClosestDistance = closestDistance;
+  } else {
+    hazardCount = 0;
+    approachCount = 0;
+    lastClosestDistance = 0;
+    lastApproachDelta = 0;
+  }
+
+  Serial.print("Closest_valid_hazard_mm:");
+  Serial.print(closestDistance);
+  Serial.print(", Hazard_count:");
+  Serial.print(hazardCount);
+  Serial.print(", Approach_count:");
+  Serial.print(approachCount);
+  Serial.print(", Approach_delta_mm:");
+  Serial.println(lastApproachDelta);
+
+  if (hazardCount >= HAZARD_CONFIRM_COUNT &&
+      approachCount >= APPROACH_CONFIRM_COUNT) {
+
+    int vibrationEffect;
+    int repeatCount;
+
+    if (closestDistance <= CLOSE_DISTANCE) {
+      vibrationEffect = HIGH_BUZZ_EFFECT;  // Effect 47
+      repeatCount = 3;
+      Serial.println(">>> CLOSE HAZARD - HIGH BUZZ, 3 PULSES <<<");
+    }
+    else if (closestDistance <= MEDIUM_DISTANCE) {
+      vibrationEffect = MEDIUM_BUZZ_EFFECT;  // Effect 46
+      repeatCount = 2;
+      Serial.println(">>> MEDIUM HAZARD - MEDIUM BUZZ, 2 PULSES <<<");
+    }
+    else {
+      vibrationEffect = LOW_BUZZ_EFFECT;  // Effect 45
+      repeatCount = 1;
+      Serial.println(">>> FAR HAZARD - LOW BUZZ, 1 PULSE <<<");
+    }
+
+    playBuzzPattern(vibrationEffect, repeatCount);
+
+    Serial.println(">>> HAPTICS FIRED <<<");
+
+    hazardCount = 0;
+    approachCount = 0;
+    lastApproachDelta = 0;
+
+    delay(300);
+  }
+
+  delay(50);
+}
