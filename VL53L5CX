@@ -1,0 +1,189 @@
+#include <Wire.h>
+#include <Adafruit_VL53L5CX.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <Adafruit_DRV2605.h>
+
+#define LPN_1 4
+#define LPN_2 5
+#define LPN_3 15
+
+Adafruit_VL53L5CX tof1;
+Adafruit_VL53L5CX tof2;
+Adafruit_VL53L5CX tof3;
+
+// Initialize BNO055 (ID 55, default I2C address 0x28)
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
+Adafruit_DRV2605 drv;
+
+unsigned long lastImuTime = 0;
+unsigned long lastHapticTime = 0;
+unsigned long lastTestBuzzTime = 0; // Added for the 2-second test buzz
+
+void setup() {
+  Serial.begin(115200);
+  while(!Serial);
+  Serial.println("Initializing Triple Adafruit VL53L5CX...");
+
+  Wire.begin(8, 9);
+  Wire.setTimeOut(50000);
+
+  pinMode(LPN_1, OUTPUT);
+  pinMode(LPN_2, OUTPUT);
+  pinMode(LPN_3, OUTPUT);
+
+  // Hard reset both to clear the bus
+  digitalWrite(LPN_1, LOW);
+  digitalWrite(LPN_2, LOW);
+  digitalWrite(LPN_3, LOW);
+  delay(200);
+
+  // --- Boot IMU First ---
+  Serial.println("\nBooting BNO055 IMU...");
+  if (!bno.begin()) {
+    Serial.println("-> BNO055 failed to boot! Check wiring or I2C address.");
+  } else {
+    Serial.println("-> SUCCESS: BNO055 online.");
+    bno.setExtCrystalUse(true); // Recommended for better accuracy
+  }
+
+  // --- Boot DRV2605L Haptic Driver ---
+  Serial.println("\nBooting DRV2605L Haptic Driver...");
+  if (!drv.begin()) {
+    Serial.println("-> DRV2605L failed to boot!");
+  } else {
+    Serial.println("-> SUCCESS: DRV2605L online.");
+    drv.selectLibrary(1); // Standard ERM vibration motor library
+    drv.setMode(DRV2605_MODE_INTTRIG); // Internal trigger mode
+  }
+
+  // STEP 1: Drop to 100kHz for ultra-stable firmware uploads
+  Wire.setClock(100000);
+
+  // --- Boot Sensor 1 ---
+  Serial.println("\nBooting Sensor 1...");
+  digitalWrite(LPN_1, HIGH);
+  delay(250);
+
+  // Explicitly target the default address 0x29 on the Wire bus
+  if (!tof1.begin(0x29, &Wire)) {
+    Serial.println("-> Sensor 1 failed to boot!");
+  } else {
+    tof1.setAddress(0x30);
+    tof1.setResolution(VL53L5CX_RESOLUTION_4X4);
+    Serial.println("-> SUCCESS: Sensor 1 online at 0x30.");
+  }
+
+  delay(100); // Give the bus a moment to settle
+
+  // --- Boot Sensor 2 ---
+  Serial.println("\nBooting Sensor 2...");
+  digitalWrite(LPN_2, HIGH);
+  delay(250);
+
+  // Explicitly target 0x29 again (Sensor 1 is now safely at 0x30)
+  if (!tof2.begin(0x29, &Wire)) {
+    Serial.println("-> Sensor 2 failed to boot!");
+  } else {
+    tof2.setAddress(0x32);
+    tof2.setResolution(VL53L5CX_RESOLUTION_4X4);
+    Serial.println("-> SUCCESS: Sensor 2 online at 0x32.");
+  }
+
+  delay(100);
+
+  // --- Boot Sensor 3 ---
+  Serial.println("\nBooting Sensor 3...");
+  digitalWrite(LPN_3, HIGH);
+  delay(250);
+
+  // Explicitly target the default address 0x29 on the Wire bus
+  if (!tof3.begin(0x29, &Wire)) {
+    Serial.println("-> Sensor 3 failed to boot!");
+  } else {
+    tof3.setAddress(0x34);
+    tof3.setResolution(VL53L5CX_RESOLUTION_4X4);
+    Serial.println("-> SUCCESS: Sensor 3 online at 0x34.");
+  }
+
+  delay(100); // Give the bus a moment to settle
+
+  // STEP 2: Ramp the clock back up to 400kHz for high-speed streaming
+  Wire.setClock(400000);
+  delay(100);
+
+  // STEP 3: Start ranging simultaneously
+  Serial.println("\nStarting Ranging...");
+  tof1.startRanging();
+  tof2.startRanging();
+  tof3.startRanging();
+  Serial.println("Streaming data...\n");
+}
+
+void loop() {
+
+  VL53L5CX_ResultsData data1;
+  VL53L5CX_ResultsData data2;
+  VL53L5CX_ResultsData data3;
+
+  if (millis() - lastImuTime > 50) {
+    lastImuTime = millis();
+    sensors_event_t orientationData;
+    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+
+    Serial.print("IMU [X: ");
+    Serial.print(orientationData.orientation.x);
+    Serial.print(" Y: ");
+    Serial.print(orientationData.orientation.y);
+    Serial.print(" Z: ");
+    Serial.print(orientationData.orientation.z);
+    Serial.println("]");
+  }
+
+  if (tof1.isDataReady() && tof1.getRangingData(&data1)) {
+    Serial.println("--- Sensor 1 (Left) ---");
+    for (int y = 0; y < 4; y++) {
+      for (int x = 0; x < 4; x++) {
+        Serial.print(data1.distance_mm[y * 4 + x]);
+        Serial.print("\t");
+      }
+      Serial.println();
+    }
+  }
+
+  if (tof2.isDataReady() && tof2.getRangingData(&data2)) {
+    Serial.println("--- Sensor 2 (Right) ---");
+    for (int y = 0; y < 4; y++) {
+      for (int x = 0; x < 4; x++) {
+        Serial.print(data2.distance_mm[y * 4 + x]);
+        Serial.print("\t");
+      }
+      Serial.println();
+    }
+    Serial.println();
+  }
+
+  if (tof3.isDataReady() && tof3.getRangingData(&data3)) {
+    Serial.println("--- Sensor 3 (Right) ---");
+    for (int y = 0; y < 4; y++) {
+      for (int x = 0; x < 4; x++) {
+        Serial.print(data3.distance_mm[y * 4 + x]);
+        Serial.print("\t");
+      }
+      Serial.println();
+    }
+  }
+
+  // 5. TEST BUZZ - Fires once every 2 seconds unconditionally
+  if (millis() - lastTestBuzzTime > 2000) {
+    lastTestBuzzTime = millis();
+
+    Serial.println("*** TEST BUZZ ***");
+
+    drv.setWaveform(0, 1); // Effect 1: Strong Click 100%
+    drv.setWaveform(1, 0); // End sequence
+    drv.go();
+
+    Serial.println("=======================");
+  }
+} 
